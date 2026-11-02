@@ -1,0 +1,21 @@
+{{- if eq .Values.ingress.className "alb" }}
+apiVersion: alibabacloud.com/v1
+kind: AlbConfig
+metadata:
+  name: alb
+spec:
+  config:
+    addressType: {{ .Values.ingress.scheme | default "Internet" }}
+    addressAllocatedMode: Fixed
+    {{- if .Values.ingress.zoneMappings }}
+    zoneMappings:
+    {{- range .Values.ingress.zoneMappings }}
+    - vSwitchId: {{ .vSwitchId }}
+    {{- end }}
+    {{- end }}
+  listeners:
+  - port: 443
+    protocol: HTTPS
+    certificates:
+    - certificateId: {{ .Values.ingress.certificateId | quote }}
+{{- end }}

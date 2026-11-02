@@ -1,0 +1,93 @@
+{{- $className := .Values.ingress.className }}
+{{- range $name, $svc := .Values.ingress.services }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fortiaigate-{{ $name }}
+  labels:
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+  annotations:
+    {{- /* Priority 1: User-defined annotations take precedence */}}
+    {{- if $.Values.ingress.annotations }}
+    {{- range $key, $value := $.Values.ingress.annotations }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+    {{- else if eq $className "alb" }}
+    # === AWS ALB ===
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/group.name: {{ $.Values.ingress.groupName }}
+    alb.ingress.kubernetes.io/group.order: {{ $svc.order | quote }}
+    alb.ingress.kubernetes.io/scheme: {{ $.Values.ingress.scheme }}
+    alb.ingress.kubernetes.io/target-type: {{ $.Values.ingress.targetType }}
+    alb.ingress.kubernetes.io/listen-ports: {{ $.Values.ingress.listenPorts | quote }}
+    {{- if $.Values.ingress.certificateArn }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ $.Values.ingress.certificateArn }}
+    {{- end }}
+    {{- if not $svc.redirect }}
+    alb.ingress.kubernetes.io/healthcheck-port: "traffic-port"
+    alb.ingress.kubernetes.io/healthcheck-path: {{ $svc.healthCheckPath }}
+    alb.ingress.kubernetes.io/success-codes: "200"
+    {{- if $.Values.tls.enabled }}
+    alb.ingress.kubernetes.io/backend-protocol: HTTPS
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTPS
+    {{- end }}
+    {{- else }}
+    alb.ingress.kubernetes.io/actions.{{ $name }}: '{"Type":"redirect","RedirectConfig":{"Path":{{ $svc.redirect.path | quote }},"StatusCode":"HTTP_301"}}'
+    {{- end }}
+    {{- else if eq $className "nginx" }}
+    # === NGINX ===
+    {{- if $.Values.tls.enabled }}
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/healthcheck-protocol: HTTPS
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    {{- end }}
+    {{- else if eq $className "traefik" }}
+    # === Traefik ===
+    {{- if $.Values.tls.enabled }}
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+    {{- end }}
+    {{- else }}
+    # === Other ingress controllers ===
+    {{- if $.Values.tls.enabled }}
+    # Backend TLS annotations for other ingress controllers
+    {{- end }}
+    {{- end }}
+spec:
+  {{- if $className }}
+  ingressClassName: {{ $className }}
+  {{- end }}
+  {{- if and $.Values.tls.enabled (ne $className "alb") }}
+  tls:
+  - hosts:
+    {{- if $.Values.ingress.host }}
+    - {{ $.Values.ingress.host }}
+    {{- else }}
+    - "*.local"
+    {{- end }}
+    secretName: fortiaigate-tls-secret
+  {{- end }}
+  rules:
+    {{- if $.Values.ingress.host }}
+    - host: {{ $.Values.ingress.host }}
+      http:
+    {{- else }}
+    - http:
+    {{- end }}
+        paths:
+          - path: {{ $svc.path }}
+            pathType: {{ if $svc.redirect }}Exact{{ else }}Prefix{{ end }}
+            backend:
+              service:
+                name: {{ if $svc.redirect }}{{ $name }}{{ else }}{{ $name }}{{ end }}
+                port:
+                  {{- if $svc.redirect }}
+                  name: use-annotation
+                  {{- else }}
+                  number: {{ $svc.port }}
+                  {{- end }}
+---
+{{- end }}

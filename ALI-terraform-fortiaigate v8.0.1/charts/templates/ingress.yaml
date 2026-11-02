@@ -1,0 +1,55 @@
+{{- $className := .Values.ingress.className }}
+{{- range $name, $svc := .Values.ingress.services }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fortiaigate-{{ $name }}
+  labels:
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+  annotations:
+    {{- if $.Values.ingress.annotations }}
+    {{- range $key, $value := $.Values.ingress.annotations }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+    {{- else if eq $className "alb" }}
+    alb.ingress.kubernetes.io/group.name: {{ $.Values.ingress.groupName }}
+    alb.ingress.kubernetes.io/group.order: {{ $svc.order | quote }}
+    alb.ingress.kubernetes.io/listen-ports: {{ $.Values.ingress.listenPorts | quote }}
+    alb.ingress.kubernetes.io/healthcheck-enabled: "true"
+    alb.ingress.kubernetes.io/healthcheck-path: {{ $svc.healthCheckPath }}
+    alb.ingress.kubernetes.io/healthcheck-code: "http_2xx"
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTPS
+    alb.ingress.kubernetes.io/healthcheck-method: GET
+    {{- if $.Values.tls.enabled }}
+    alb.ingress.kubernetes.io/backend-protocol: https
+    {{- end }}
+    {{- if $svc.rewriteTarget }}
+    alb.ingress.kubernetes.io/rewrite-target: {{ $svc.rewriteTarget }}
+    {{- end }}
+    {{- else if eq $className "nginx" }}
+    {{- if $.Values.tls.enabled }}
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    {{- end }}
+    {{- end }}
+spec:
+  ingressClassName: {{ $className }}
+  rules:
+    {{- if $.Values.ingress.host }}
+    - host: {{ $.Values.ingress.host }}
+      http:
+    {{- else }}
+    - http:
+    {{- end }}
+        paths:
+          - path: {{ $svc.path }}
+            pathType: {{ if $svc.rewriteTarget }}Exact{{ else }}Prefix{{ end }}
+            backend:
+              service:
+                name: {{ $svc.serviceName | default (regexReplaceAll "^redirect-" $name "") }}
+                port:
+                  number: {{ $svc.port }}
+---
+{{- end }}

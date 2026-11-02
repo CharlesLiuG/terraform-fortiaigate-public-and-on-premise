@@ -1,0 +1,218 @@
+# API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app: api
+    app.kubernetes.io/name: fortiaigate
+    app.kubernetes.io/part-of: fortiaigate-platform
+    app.kubernetes.io/managed-by: helm
+    component: api
+    version: v1
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: {{ .Values.api.replicas }}
+  strategy:
+    type: {{ .Values.fortiaigate.updateStrategy }}
+  selector:
+    matchLabels:
+      app: api
+      component: api
+  template:
+    metadata:
+      annotations:
+        # This is the key that triggers a restart when TLS certificates change
+        checksum/config: {{ printf "%s%s" (tpl (.Files.Get .Values.tls.cert) $) (tpl (.Files.Get .Values.tls.key) $) | sha256sum }}
+      labels:
+        app: api
+        component: api
+        version: v1
+    spec:
+      # NO nodeAffinity. Pods used to be pinned to the nodes named in
+      # global.licenses, which was coherent only while a licence belonged to a
+      # node. A licence now covers the deployment and names no machine, so
+      # there is nothing to pin to — and the pinning was load-bearing in the
+      # wrong direction: with the map left at its default the rendered
+      # matchExpression had an empty `values`, which Kubernetes rejects, so the
+      # chart could not be installed without inventing a licence map.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: api
+        image: {{ .Values.fortiaigate.image.repository }}/api:{{ .Values.fortiaigate.image.tag }}
+        imagePullPolicy: {{ .Values.fortiaigate.image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        resources:
+          {{- toYaml .Values.api.resources | nindent 10 }}
+        # Environment variables
+        env:
+        - name: FORTIAIGATE_LOG_LEVEL
+          value: {{ .Values.fortiaigate.env.logLevel | quote }}
+        # Failure-policy pins (fortiaigate.failurePolicy.*, #91): rendered only
+        # for a knob that is set, so any knob left empty stays with the org's
+        # Runtime Defaults document. One helper feeds this pod and llm-gateway, so
+        # the two cannot disagree on the policy.
+        {{- with (include "fortiaigate.failurePolicyEnv" . | trim) }}
+        {{- . | nindent 8 }}
+        {{- end }}
+        # The guardrail dispatcher pool (faig.guardrail.v1/Scan) the detector
+        # Playground scans through: POST /api/v1/.../detectors/{uuid}/test runs
+        # sample text on the SAME pool llm-gateway.yaml points at, so the panel
+        # reports the verdict the gateway would reach. One override answers both
+        # pods (llmGateway.env.guardrailAddr); api.env.guardrailAddr wins here
+        # if a deployment needs them apart. TLS posture is inferred in-process
+        # from FORTIAIGATE_SSL_CERT_FILE, exactly as the gateway infers it.
+        # "off" disables the Playground's server run (the endpoint answers 503).
+        - name: FAIG_GUARDRAIL_ADDR
+          value: {{ (.Values.api.env).guardrailAddr | default (.Values.llmGateway.env).guardrailAddr | default "guardrail:50051" | quote }}
+        # SSO (SAML 2.0): tier 1 of the external-URL prefill — sso.externalUrl,
+        # falling back to https://<ingress.host>. Only a PREFILL: the admin
+        # confirms the value on the Authentication page and the confirmed copy
+        # is what authentication validates against.
+        {{- $ssoExternal := default (ternary (printf "https://%s" .Values.ingress.host) "" (ne .Values.ingress.host "")) ((.Values.sso).externalUrl) }}
+        {{- if $ssoExternal }}
+        - name: FORTIAIGATE_EXTERNAL_URL
+          value: {{ $ssoExternal | quote }}
+        {{- end }}
+        - name: CSRF_SECRET_KEY
+          valueFrom:
+            {{- if .Values.fortiaigate.env.csrfSecretKey }}
+            value: {{ .Values.fortiaigate.env.csrfSecretKey | quote }}
+            {{- else }}
+            secretKeyRef:
+              name: {{ include "fortiaigate.fullname" . }}-csrf
+              key: csrf-secret-key
+            {{- end }}
+        # Master key sealing credential secrets at rest (go-common/secret).
+        # Name resolution (explicit override, else chart-generated) lives in
+        # fortiaigate.masterKeySecretName so api/llm-gateway/guardrail always
+        # agree on the same key. Absent a real key: api-go refuses credential
+        # writes with 503 rather than storing plaintext (v1_models.go keysource
+        # contract) — but the chart now always generates one by default, so
+        # that path only fires when a supplied override name doesn't exist.
+        - name: FAIG_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "fortiaigate.masterKeySecretName" . }}
+              key: master-key
+        {{- if .Values.tls.enabled }}
+        - name: FORTIAIGATE_SSL_CERT_FILE
+          value: {{ printf "%s/tls.crt" .Values.tls.mountPath | quote }}
+        - name: FORTIAIGATE_SSL_KEY_FILE
+          value: {{ printf "%s/tls.key" .Values.tls.mountPath | quote }}
+        {{- end }}
+        - name: REDIS_SSL_ENABLED
+          value: {{ .Values.redis.tls.enabled | quote }}
+        {{- if .Values.redis.tls.enabled }}
+        - name: REDIS_SSL_CERTFILE
+          value: {{ printf "%s/tls.crt" .Values.tls.mountPath | quote }}
+        - name: REDIS_SSL_KEYFILE
+          value: {{ printf "%s/tls.key" .Values.tls.mountPath | quote }}
+        - name: REDIS_SSL_CA_CERTS
+          value: {{ printf "%s/tls.crt" .Values.tls.mountPath | quote }}
+        {{- end }}
+        - name: POSTGRES_SSL_ENABLED
+          value: {{ .Values.postgresql.tls.enabled | quote }}
+        {{- if .Values.postgresql.tls.enabled }}
+        - name: POSTGRES_SSL_CERTFILE
+          value: {{ printf "%s/tls.crt" .Values.tls.mountPath | quote }}
+        - name: POSTGRES_SSL_KEYFILE
+          value: {{ printf "%s/tls.key" .Values.tls.mountPath | quote }}
+        - name: POSTGRES_SSL_CA_CERTS
+          value: {{ printf "%s/tls.crt" .Values.tls.mountPath | quote }}
+        {{- end }}
+        # Database configuration (only what's actually used by the application)
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "fortiaigate.fullname" . }}-db-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "fortiaigate.fullname" . }}-db-config
+              key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-redis
+              key: redis-password
+        # Database credentials (from auto-generated PostgreSQL secret and values)
+        - name: POSTGRES_USER
+          value: "{{ .Values.postgresql.auth.username }}"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-postgresql
+              key: password
+        - name: POSTGRES_DB
+          value: "{{ .Values.postgresql.auth.database }}"
+        - name: POSTGRES_HOST
+          value: "{{ .Release.Name }}-postgresql"
+        - name: POSTGRES_PORT
+          value: "{{ .Values.postgresql.primary.service.port }}"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+        - name: shared-data
+          mountPath: /etc/fortiaigate/
+          readOnly: false
+        - name: tmp
+          mountPath: /tmp
+        {{- if or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled }}
+        - name: tls-certs
+          mountPath: {{ .Values.tls.mountPath | quote }}
+          readOnly: true
+        {{- end }}
+      volumes:
+      - name: shared-data
+        persistentVolumeClaim:
+          claimName: {{ include "fortiaigate.fullname" . }}-storage
+      - name: tmp
+        emptyDir: {}
+      {{- if or .Values.tls.enabled .Values.redis.tls.enabled .Values.postgresql.tls.enabled }}
+      - name: tls-certs
+        secret:
+          secretName: fortiaigate-tls-secret
+      {{- end }}
+      {{- with .Values.fortiaigate.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels:
+    app: api
+    component: api
+spec:
+  selector:
+    app: api
+    component: api
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
+    name: http
+  type: ClusterIP
